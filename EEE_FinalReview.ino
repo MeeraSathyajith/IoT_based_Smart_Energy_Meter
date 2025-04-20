@@ -1,0 +1,1269 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <EmonLib.h>
+#include <ArduinoJson.h>
+
+// WiFi credentials
+const char* ssid = "Praneeth's F54";
+const char* password = "128R126R";
+
+// Energy monitor setup
+EnergyMonitor emon;
+#define vCalibration 115
+#define currCalibration 1.8
+
+// LCD setup - Use the correct library for ESP32
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Web server
+WebServer server(80);
+
+// Variables for energy calculation
+unsigned long lastMillis = millis();
+float smoothedPower = 0.0;
+float alpha = 0.1;
+float totalEnergy;
+
+// Admin credentials
+const char* adminUser = "admin";
+const char* adminPass = "admin123";
+void handleData();
+void handleLogin();
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize LCD
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(1, 0);
+  lcd.print("IoT Energy Meter");
+  delay(300);
+  lcd.clear();
+
+  // Initialize EmonLib
+  emon.voltage(35, vCalibration, 1.7);
+  emon.current(34, currCalibration);
+
+  // Connect to WiFi
+  WiFi.begin(ssid, password);
+  lcd.setCursor(0, 0);
+  lcd.print("Connecting to WiFi");
+  
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    lcd.print(".");
+  }
+  
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("WiFi Connected");
+  lcd.setCursor(0, 1);
+  lcd.print("IP: ");
+  lcd.print(WiFi.localIP());
+  delay(2000);
+  lcd.clear();
+
+  // Set up web server routes
+  server.on("/", handleRoot);
+  server.on("/data", handleData);
+  server.on("/login", handleLogin);
+  
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+void loop() {
+  server.handleClient();
+  updateEnergyMeasurements();
+  displayLCD();
+  delay(200);
+}
+
+void updateEnergyMeasurements() {
+  // Perform energy calculations
+  emon.calcVI(20, 100);
+  
+  float Vrms = emon.Vrms;
+  float Irms = emon.Irms;
+  float rawRealPower = Vrms * Irms * 0.96;
+  smoothedPower = alpha * rawRealPower + (1 - alpha) * smoothedPower;
+  
+  // Calculate energy (convert W to Wh)
+  unsigned long now = millis();
+  float elapsedHours = (now - lastMillis) / 3600000.0; // Convert ms to hours
+  totalEnergy = smoothedPower/1000;
+  lastMillis = now;
+}
+
+void displayLCD() {
+  // Update LCD display
+  lcd.setCursor(0, 0);
+  lcd.print("V:");
+  lcd.print(emon.Vrms, 1);
+  lcd.print(" I:");
+  lcd.print(emon.Irms, 2);
+  lcd.print(" A");
+  
+  lcd.setCursor(0, 1);
+  lcd.print("P:");
+  lcd.print(smoothedPower, 1);
+  lcd.print("W E:");
+  lcd.print(totalEnergy, 3); // Convert to kWh
+  lcd.print("kWh");
+}
+
+void handleRoot() {
+  String html = R"=====(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Energy Meter</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    <style>
+     :root {
+            --primary: #3498db;
+            --secondary: #2c3e50;
+            --success: #2ecc71;
+            --danger: #e74c3c;
+            --warning: #f39c12;
+            --light: #ecf0f1;
+            --dark: #34495e;
+            --card-bg: rgba(255, 255, 255, 0.9);
+            --text-color: #34495e;
+            --bg-color: #f8f9fa;
+            --input-bg: white;
+            --transition-speed: 0.3s;
+        }
+        
+        [data-theme="dark"] {
+            --primary: #6fa8dc;
+            --secondary: #203345;
+            --card-bg: rgba(52, 73, 94, 0.9);
+            --text-color: #ecf0f1;
+            --bg-color: #1a1a2e;
+            --input-bg: #2c3e50;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            transition: background-color var(--transition-speed), color var(--transition-speed);
+        }
+        
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            overflow-x: hidden;
+            position: relative;
+        }
+        
+        .login-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+            transition: opacity 0.5s ease;
+        }
+        
+        .login-form {
+            background-color: var(--card-bg);
+            padding: 32px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            backdrop-filter: blur(10px);
+            width: 100%;
+            max-width: 400px;
+            transform: translateY(0);
+            transition: transform 0.5s ease, box-shadow 0.5s ease;
+        }
+        
+        .login-form:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.25);
+        }
+        
+        .login-form h2 {
+            text-align: center;
+            margin-bottom: 24px;
+            color: var(--text-color);
+        }
+        
+        .form-group {
+            margin-bottom: 16px;
+            position: relative;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: var(--text-color);
+            transform-origin: left;
+            transition: transform 0.3s, color 0.3s;
+        }
+        
+        .form-group.active label {
+            transform: translateY(-20px) scale(0.8);
+            color: var(--primary);
+        }
+        
+        .form-group input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            font-size: 16px;
+            background-color: var(--input-bg);
+            color: var(--text-color);
+            transition: border 0.3s ease;
+        }
+        
+        .form-group input:focus {
+            border-color: var(--primary);
+            outline: none;
+        }
+        
+        .password-toggle {
+            position: absolute;
+            right: 10px;
+            top: 38px;
+            cursor: pointer;
+            color: #777;
+        }
+        
+        .btn {
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            border-radius: 10px;
+            cursor: pointer;
+            width: 100%;
+            margin-top: 16px;
+            transition: transform 0.3s, background-color 0.3s;
+        }
+        
+        .btn:hover {
+            background-color: #2980b9;
+            transform: translateY(-2px);
+        }
+        
+        .dashboard {
+            display: none;
+            padding: 24px 32px;
+            transition: all 0.3s ease;
+        }
+        
+        .dashboard.sidebar-open {
+            margin-right: 380px;
+        }
+        
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 32px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid #ddd;
+        }
+        
+        .header h1 {
+            color: var(--text-color);
+        }
+
+        .action-buttons {
+            display: flex;
+            gap: 16px;
+        }
+
+        .theme-toggle {
+            background-color: var(--secondary);
+            color: white;
+            border: none;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: transform 0.3s, background-color 0.3s;
+        }
+        
+        .theme-toggle:hover {
+            transform: rotate(30deg);
+        }
+
+        .btn-sm {
+            padding: 8px 16px;
+            font-size: 14px;
+            border-radius: 10px;
+            cursor: pointer;
+            border: none;
+            transition: transform 0.3s, background-color 0.3s;
+        }
+
+        .bill-btn {
+            background-color: var(--primary);
+            color: white;
+        }
+        
+        .bill-btn:hover {
+            background-color: #2980b9;
+            transform: translateY(-2px);
+        }
+
+        .logout-btn {
+            background-color: var(--danger);
+            color: white;
+        }
+        
+        .logout-btn:hover {
+            background-color: #c0392b;
+            transform: translateY(-2px);
+        }
+        
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 32px;
+            margin-bottom: 32px;
+        }
+        
+        .meter-card {
+            background-color: var(--card-bg);
+            border-radius: 15px;
+            padding: 24px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            backdrop-filter: blur(10px);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        
+        .meter-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
+        }
+        
+        .meter-title {
+            margin-bottom: 16px;
+            font-size: 24px;
+            font-weight: 600;
+            color: var(--text-color);
+        }
+        
+        .meter-display {
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        
+        .meter-value-container {
+            position: relative;
+            width: 100%;
+            height: 130px;
+            margin-bottom: 24px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        .meter-value {
+            font-size: 28px;
+            font-weight: bold;
+            color: var(--text-color);
+            position: relative;
+            z-index: 2;
+            transition: color 0.3s;
+        }
+        
+        .meter-unit {
+            font-size: 19px;
+            color: var(--text-color);
+            opacity: 0.8;
+            margin-top: 8px;
+            transition: color 0.3s;
+        }
+        
+        .meter-progress {
+            width: 100%;
+            height: 8px;
+            background-color: rgba(238, 238, 238, 0.4);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+        
+        .meter-progress-bar {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 1s ease;
+        }
+        
+        .chart-container {
+            width: 100%;
+            height: 120px;
+            margin-top: 16px;
+        }
+        
+        .progress-voltage {
+            background: linear-gradient(90deg, #3498db, #9b59b6);
+        }
+        
+        .progress-current {
+            background: linear-gradient(90deg, #f39c12, #e74c3c);
+        }
+        
+        .progress-power {
+            background: linear-gradient(90deg, #2ecc71, #1abc9c);
+        }
+        
+        .progress-energy {
+            background: linear-gradient(90deg, #f1c40f, #f39c12);
+        }
+        
+        .progress-pf {
+            background: linear-gradient(90deg, #3498db, #2c3e50);
+        }
+        
+        .bill-sidebar {
+            position: fixed;
+            top: 0;
+            right: -380px;
+            width: 380px;
+            height: 100vh;
+            background-color: var(--card-bg);
+            box-shadow: -5px 0 15px rgba(0, 0, 0, 0.1);
+            transition: right 0.3s ease;
+            overflow-y: auto;
+            z-index: 1000;
+            padding: 24px;
+            backdrop-filter: blur(10px);
+        }
+        
+        .bill-sidebar.open {
+            right: 0;
+        }
+        
+        .bill-close {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            color: var(--text-color);
+        }
+        
+        .bill-header {
+            display: flex;
+            flex-direction: column;
+            margin-bottom: 24px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid #ddd;
+        }
+        
+        .bill-header h2 {
+            margin-bottom: 16px;
+            color: var(--text-color);
+        }
+        
+        .bill-section {
+            margin-bottom: 24px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid rgba(238, 238, 238, 0.2);
+        }
+        
+        .bill-section h3 {
+            margin-bottom: 16px;
+            color: var(--text-color);
+        }
+        
+        .bill-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            color: var(--text-color);
+        }
+        
+        .bill-row strong {
+            color: var(--text-color);
+        }
+        
+        .bill-total {
+            font-size: 19px;
+            font-weight: bold;
+            text-align: right;
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid rgba(221, 221, 221, 0.2);
+            color: var(--text-color);
+        }
+        
+        .print-btn {
+            background-color: var(--success);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            border-radius: 10px;
+            cursor: pointer;
+            margin-top: 16px;
+            width: 100%;
+            transition: transform 0.3s, background-color 0.3s;
+        }
+        
+        .print-btn:hover {
+            background-color: #27ae60;
+            transform: translateY(-2px);
+        }
+
+        .circle-indicator {
+            position: absolute;
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            background: conic-gradient(var(--primary) 0%, transparent 0%);
+            transform: rotate(-90deg);
+            transition: background 1s ease;
+        }
+
+        .circle-indicator::before {
+            content: "";
+            position: absolute;
+            width: 90px;
+            height: 90px;
+            border-radius: 50%;
+            background-color: var(--card-bg);
+            top: 15px;
+            left: 15px;
+            transition: background-color 0.3s;
+        }
+        
+        .toast {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 12px 20px;
+            background-color: rgba(46, 204, 113, 0.9);
+            color: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            z-index: 1100;
+            transform: translateX(150%);
+            transition: transform 0.3s ease;
+            backdrop-filter: blur(5px);
+        }
+        
+        .toast.show {
+            transform: translateX(0);
+        }
+        
+        .toast.success {
+            background-color: rgba(46, 204, 113, 0.9);
+        }
+        
+        .toast.error {
+            background-color: rgba(231, 76, 60, 0.9);
+        }
+        
+        .toast.info {
+            background-color: rgba(52, 152, 219, 0.9);
+        }
+
+        @media print {
+            body * {
+                visibility: hidden;
+            }
+            .bill-sidebar, .bill-sidebar * {
+                visibility: visible;
+            }
+            .bill-sidebar {
+                position: absolute;
+                left: 0;
+                top: 0;
+                width: 100%;
+                height: auto;
+                box-shadow: none;
+            }
+            .bill-close, .print-btn {
+                display: none;
+            }
+        }
+        
+        @media (max-width: 768px) {
+            .dashboard-grid {
+                grid-template-columns: 1fr;
+            }
+            .dashboard.sidebar-open {
+                margin-right: 0;
+            }
+            .bill-sidebar {
+                width: 100%;
+            }
+        }
+        /* All your CSS styles here */
+    </style>
+</head>
+<body>
+ <!-- Toast Notification -->
+    <div id="toast" class="toast">
+        <span id="toastMessage">Notification</span>
+    </div>
+
+    <!-- Login Section -->
+    <div class="login-container" id="loginContainer">
+        <div class="login-form">
+            <h2>Smart Energy Meter</h2>
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" placeholder="Enter admin username">
+            </div>
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" placeholder="Enter password">
+                <span class="password-toggle" id="passwordToggle">👁️</span>
+            </div>
+            <button class="btn" id="loginBtn">Login</button>
+        </div>
+    </div>
+
+    <!-- Dashboard Section -->
+    <div class="dashboard" id="dashboard">
+        <div class="header">
+            <h1>Energy Monitoring Dashboard</h1>
+            <div class="action-buttons">
+                <button class="theme-toggle" id="themeToggle">🌙</button>
+                <button class="btn-sm bill-btn" id="billBtn">View Bill</button>
+                <button class="btn-sm logout-btn" id="logoutBtn">Logout</button>
+            </div>
+        </div>
+
+        <div class="dashboard-grid">
+            <!-- Voltage Meter -->
+            <div class="meter-card">
+                <h3 class="meter-title">Voltage</h3>
+                <div class="meter-display">
+                    <div class="meter-value-container">
+                        <div class="circle-indicator" id="voltageIndicator"></div>
+                        <div class="meter-value" id="voltageValue">0</div>
+                    </div>
+                    <div class="meter-unit">Volts</div>
+                    <div class="meter-progress">
+                        <div class="meter-progress-bar progress-voltage" id="voltageBar"></div>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="voltageChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Current Meter -->
+            <div class="meter-card">
+                <h3 class="meter-title">Current</h3>
+                <div class="meter-display">
+                    <div class="meter-value-container">
+                        <div class="circle-indicator" id="currentIndicator"></div>
+                        <div class="meter-value" id="currentValue">0</div>
+                    </div>
+                    <div class="meter-unit">Amps</div>
+                    <div class="meter-progress">
+                        <div class="meter-progress-bar progress-current" id="currentBar"></div>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="currentChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Power Meter -->
+            <div class="meter-card">
+                <h3 class="meter-title">Power</h3>
+                <div class="meter-display">
+                    <div class="meter-value-container">
+                        <div class="circle-indicator" id="powerIndicator"></div>
+                        <div class="meter-value" id="powerValue">0</div>
+                    </div>
+                    <div class="meter-unit">Watts</div>
+                    <div class="meter-progress">
+                        <div class="meter-progress-bar progress-power" id="powerBar"></div>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="powerChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Energy Meter -->
+            <div class="meter-card">
+                <h3 class="meter-title">Energy</h3>
+                <div class="meter-display">
+                    <div class="meter-value-container">
+                        <div class="circle-indicator" id="energyIndicator"></div>
+                        <div class="meter-value" id="energyValue">0</div>
+                    </div>
+                    <div class="meter-unit">kWh</div>
+                    <div class="meter-progress">
+                        <div class="meter-progress-bar progress-energy" id="energyBar"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Power Factor Meter -->
+            <div class="meter-card">
+                <h3 class="meter-title">Power Factor</h3>
+                <div class="meter-display">
+                    <div class="meter-value-container">
+                        <div class="circle-indicator" id="pfIndicator"></div>
+                        <div class="meter-value" id="pfValue">0</div>
+                    </div>
+                    <div class="meter-unit">PF</div>
+                    <div class="meter-progress">
+                        <div class="meter-progress-bar progress-pf" id="pfBar"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bill Sidebar -->
+    <div class="bill-sidebar" id="billSidebar">
+        <button class="bill-close" id="billClose">×</button>
+        <div class="bill-header">
+            <h2>Electricity Bill</h2>
+            <div>
+                <p id="billDate">Date: </p>
+                <p id="billTime">Time: </p>
+            </div>
+        </div>
+
+        <div class="bill-section">
+            <h3>Consumer Details</h3>
+            <div class="bill-row">
+                <strong>Consumer Name:</strong>
+                <span>John Doe</span>
+            </div>
+            <div class="bill-row">
+                <strong>Consumer Number:</strong>
+                <span>1234567890</span>
+            </div>
+            <div class="bill-row">
+                <strong>Connection Type:</strong>
+                <span>Domestic</span>
+            </div>
+        </div>
+
+        <div class="bill-section">
+            <h3>Billing Information</h3>
+            <div class="bill-row">
+                <strong>Billing Period:</strong>
+                <span id="billingPeriod"></span>
+            </div>
+            <div class="bill-row">
+                <strong>Total Energy:</strong>
+                <span id="billEnergy">0 kWh</span>
+            </div>
+            <div class="bill-row">
+                <strong>Average Power:</strong>
+                <span id="avgPower">0 W</span>
+            </div>
+        </div>
+
+        <div class="bill-section">
+            <h3>Consumption Charges</h3>
+            <div class="bill-row">
+                <span>Energy Charges (<span id="billEnergyUnit">0</span> kWh)</span>
+                <span id="energyCharges">₹ 0.00</span>
+            </div>
+            <div class="bill-row">
+                <span>Fixed Charges</span>
+                <span>₹ 50.00</span>
+            </div>
+            <div class="bill-row">
+                <span>Tax (5%)</span>
+                <span id="taxAmount">₹ 0.00</span>
+            </div>
+
+            <div class="bill-total">
+                <div class="bill-row">
+                    <strong>Total Amount:</strong>
+                    <strong id="totalAmount">₹ 50.00</strong>
+                </div>
+            </div>
+        </div>
+
+        <div class="tariff-info">
+            <p><strong>Tariff Rates (Domestic):</strong></p>
+            <p>0-100 kWh: ₹3.50/kWh</p>
+            <p>101-300 kWh: ₹4.60/kWh</p>
+            <p>301-500 kWh: ₹6.60/kWh</p>
+            <p>>500 kWh: ₹7.30/kWh</p>
+        </div>
+
+        <button class="print-btn" id="printBtn">Print Bill</button>
+    </div>
+
+    <script>
+        // Default admin credentials
+        const ADMIN_USER = "admin";
+        const ADMIN_PASS = "admin123";
+
+        // Element references
+        const loginContainer = document.getElementById("loginContainer");
+        const dashboard = document.getElementById("dashboard");
+        const loginBtn = document.getElementById("loginBtn");
+        const logoutBtn = document.getElementById("logoutBtn");
+        const printBtn = document.getElementById("printBtn");
+        const billBtn = document.getElementById("billBtn");
+        const billSidebar = document.getElementById("billSidebar");
+        const billClose = document.getElementById("billClose");
+        const themeToggle = document.getElementById("themeToggle");
+        const passwordToggle = document.getElementById("passwordToggle");
+        const toast = document.getElementById("toast");
+        const toastMessage = document.getElementById("toastMessage");
+        
+        // Theme toggle functionality
+        themeToggle.addEventListener("click", () => {
+            const isDark = document.body.getAttribute("data-theme") === "dark";
+            document.body.setAttribute("data-theme", isDark ? "light" : "dark");
+            themeToggle.textContent = isDark ? "🌙" : "☀️";
+            showToast(`${isDark ? "Light" : "Dark"} theme activated`, "info");
+        });
+        
+        // Password toggle functionality
+        passwordToggle.addEventListener("click", () => {
+            const passwordInput = document.getElementById("password");
+            if (passwordInput.type === "password") {
+                passwordInput.type = "text";
+                passwordToggle.textContent = "👁️‍🗨️";
+            } else {
+                passwordInput.type = "password";
+                passwordToggle.textContent = "👁️";
+            }
+        });
+        
+        // Form group active state
+        const inputs = document.querySelectorAll(".form-group input");
+        inputs.forEach(input => {
+            input.addEventListener("focus", () => {
+                input.parentElement.classList.add("active");
+            });
+            
+            input.addEventListener("blur", () => {
+                if (input.value === "") {
+                    input.parentElement.classList.remove("active");
+                }
+            });
+            
+            // Check on load if input has value
+            if (input.value !== "") {
+                input.parentElement.classList.add("active");
+            }
+        });
+        
+        // Toast notification function
+        function showToast(message, type = "success") {
+            toastMessage.textContent = message;
+            toast.className = `toast ${type} show`;
+            
+            setTimeout(() => {
+                toast.className = toast.className.replace("show", "");
+            }, 3000);
+        }
+        
+        // Login functionality with animation
+        loginBtn.addEventListener("click", () => {
+            const username = document.getElementById("username").value;
+            const password = document.getElementById("password").value;
+            
+            if (username === ADMIN_USER && password === ADMIN_PASS) {
+                loginContainer.style.opacity = "0";
+                setTimeout(() => {
+                    loginContainer.style.display = "none";
+                    dashboard.style.display = "block";
+                    setTimeout(() => {
+                        showToast("Login successful!", "success");
+                    }, 500);
+                    initDashboard();
+                }, 500);
+            } else {
+                showToast("Invalid credentials! Please try again.", "error");
+                loginContainer.classList.add("shake");
+                setTimeout(() => {
+                    loginContainer.classList.remove("shake");
+                }, 500);
+            }
+        });
+        
+        // Logout functionality
+        logoutBtn.addEventListener("click", () => {
+            showToast("Logged out successfully", "info");
+            setTimeout(() => {
+                loginContainer.style.display = "flex";
+                loginContainer.style.opacity = "1";
+                dashboard.style.display = "none";
+                document.getElementById("username").value = "";
+                document.getElementById("password").value = "";
+                document.getElementById("username").parentElement.classList.remove("active");
+                document.getElementById("password").parentElement.classList.remove("active");
+                billSidebar.classList.remove("open");
+                dashboard.classList.remove("sidebar-open");
+            }, 500);
+        });
+        
+        // Bill sidebar toggle
+        billBtn.addEventListener("click", () => {
+            billSidebar.classList.add("open");
+            dashboard.classList.add("sidebar-open");
+            showToast("Bill view opened", "info");
+        });
+        
+        billClose.addEventListener("click", () => {
+            billSidebar.classList.remove("open");
+            dashboard.classList.remove("sidebar-open");
+        });
+        
+        // Print functionality
+        printBtn.addEventListener("click", () => {
+            showToast("Printing bill...", "info");
+            setTimeout(() => {
+                window.print();
+            }, 1000);
+        });
+
+        // Charts configuration
+        let voltageChart, currentChart, powerChart;
+        let voltageData = [], currentData = [], powerData = [];
+        const timeLabels = Array(20).fill('').map((_, i) => `-${20-i}s`);
+        
+        function initCharts() {
+            const chartOptions = {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        display: false
+                    },
+                    tooltip: {
+                        enabled: true
+                    }
+                },
+                scales: {
+                    x: {
+                        grid: {
+                            display: false
+                        },
+                        display: false
+                    },
+                    y: {
+                        grid: {
+                            display: false
+                        },
+                        display: false
+                    }
+                },
+                elements: {
+                    line: {
+                        tension: 0.4
+                    },
+                    point: {
+                        radius: 0
+                    }
+                },
+                animation: {
+                    duration: 800
+                }
+            };
+            
+            // Initialize charts
+            voltageChart = new Chart(document.getElementById('voltageChart'), {
+                type: 'line',
+                data: {
+                    labels: timeLabels,
+                    datasets: [{
+                        data: voltageData,
+                        borderColor: '#3498db',
+                        backgroundColor: 'rgba(52, 152, 219, 0.2)',
+                        fill: true
+                    }]
+                },
+                options: chartOptions
+            });
+            
+            currentChart = new Chart(document.getElementById('currentChart'), {
+                type: 'line',
+                data: {
+                    labels: timeLabels,
+                    datasets: [{
+                        data: currentData,
+                        borderColor: '#e74c3c',
+                        backgroundColor: 'rgba(231, 76, 60, 0.2)',
+                        fill: true
+                    }]
+                },
+                options: chartOptions
+            });
+            
+            powerChart = new Chart(document.getElementById('powerChart'), {
+                type: 'line',
+                data: {
+                    labels: timeLabels,
+                    datasets: [{
+                        data: powerData,
+                        borderColor: '#2ecc71',
+                        backgroundColor: 'rgba(46, 204, 113, 0.2)',
+                        fill: true
+                    }]
+                },
+                options: chartOptions
+            });
+        }
+        
+        // Initialize the dashboard with current date and time
+        function initDashboard() {
+            // Initialize chart data
+            voltageData = Array(20).fill(0).map(() => 220 + (Math.random() * 10 - 5));
+            currentData = Array(20).fill(0).map(() => 2 + (Math.random() * 1.5));
+            powerData = Array(20).fill(0).map((_, i) => voltageData[i] * currentData[i] * 0.95);
+            
+            updateDateTime();
+            setInterval(updateDateTime, 1000);
+            
+            // Initialize charts
+            initCharts();
+            
+            // Start with zero values
+            updateMeter("voltageValue", "voltageBar", "voltageIndicator", 0, 300);
+            updateMeter("currentValue", "currentBar", "currentIndicator", 0, 10);
+            updateMeter("powerValue", "powerBar", "powerIndicator", 0, 3000);
+            updateMeter("energyValue", "energyBar", "energyIndicator", 0, 50);
+            updateMeter("pfValue", "pfBar", "pfIndicator", 0, 1);
+            
+            // Start regular updates (every 2 seconds)
+            fetchSensorData(); // Immediate first fetch
+            setInterval(fetchSensorData, 2000);
+        }
+
+        // Update date and time
+        function updateDateTime() {
+            const now = new Date();
+            const date = now.toLocaleDateString('en-IN');
+            const time = now.toLocaleTimeString('en-IN');
+            
+            document.getElementById("billDate").textContent = "Date: " + date;
+            document.getElementById("billTime").textContent = "Time: " + time;
+            
+            const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
+            const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+            
+            const periodString = firstDay.toLocaleDateString('en-IN') + " to " + lastDay.toLocaleDateString('en-IN');
+            document.getElementById("billingPeriod").textContent = periodString;
+        }
+
+        // Smooth animation for gauge updates
+        function animateMeterValue(elementId, startValue, endValue, duration = 1000) {
+            const element = document.getElementById(elementId);
+            const startTime = performance.now();
+            const changeValue = endValue - startValue;
+            
+            function updateValue(currentTime) {
+                const elapsedTime = currentTime - startTime;
+                if (elapsedTime < duration) {
+                    const progress = elapsedTime / duration;
+                    const currentValue = startValue + changeValue * progress;
+                    element.textContent = currentValue.toFixed(currentValue < 10 ? 2 : 1);
+                    requestAnimationFrame(updateValue);
+                } else {
+                    element.textContent = endValue.toFixed(endValue < 10 ? 2 : 1);
+                }
+            }
+            
+            requestAnimationFrame(updateValue);
+        }
+
+        // Update meter values with smooth animation
+        function updateMeter(valueId, barId, indicatorId, value, maxValue) {
+            const currentValue = parseFloat(document.getElementById(valueId).textContent);
+            const percentage = (value / maxValue) * 100;
+            const clampedPercentage = Math.min(percentage, 100);
+            
+            // Animate value display
+            animateMeterValue(valueId, currentValue, value);
+            
+            // Update progress bar
+            document.getElementById(barId).style.width = clampedPercentage + "%";
+            
+            // Update circle indicator
+            const degValue = (clampedPercentage * 3.6) + "deg";
+            document.getElementById(indicatorId).style.background = 
+                `conic-gradient(var(--primary) ${degValue}, transparent ${degValue})`;
+        }
+
+        // Calculate bill based on Indian electricity tariff slabs (typical domestic rates)
+        function calculateBill(kWh) {
+            let totalCharge = 0;
+            
+            // Fixed charge
+            const fixedCharge = 50;
+            
+            // Energy charge calculation based on slabs
+            if (kWh <= 100) {
+                totalCharge = kWh * 3.50;
+            } else if (kWh <= 300) {
+                totalCharge = 100 * 3.50 + (kWh - 100) * 4.60;
+            } else if (kWh <= 500) {
+                totalCharge = 100 * 3.50 + 200 * 4.60 + (kWh - 300) * 6.60;
+            } else {
+                totalCharge = 100 * 3.50 + 200 * 4.60 + 200 * 6.60 + (kWh - 500) * 7.30;
+            }
+            
+            const energyCharge = totalCharge;
+            const tax = (energyCharge + fixedCharge) * 0.05;
+            const totalBill = energyCharge + fixedCharge + tax;
+            
+            return {
+                energyCharge: energyCharge.toFixed(2),
+                fixedCharge: fixedCharge.toFixed(2),
+                tax: tax.toFixed(2),
+                total: totalBill.toFixed(2)
+            };
+        }
+
+        // Update bill calculations
+        function updateBillCalculations(kWh) {
+            const bill = calculateBill(kWh);
+            
+            document.getElementById("billEnergy").textContent = kWh.toFixed(2) + " kWh";
+            document.getElementById("billEnergyUnit").textContent = kWh.toFixed(2);
+            document.getElementById("energyCharges").textContent = "₹ " + bill.energyCharge;
+            document.getElementById("taxAmount").textContent = "₹ " + bill.tax;
+            document.getElementById("totalAmount").textContent = "₹ " + bill.total;
+            
+            // Calculate average power (assuming 30 days billing cycle)
+            const avgPowerWatts = (kWh * 1000) / (30 * 24);
+            document.getElementById("avgPower").textContent = avgPowerWatts.toFixed(2) + " W";
+        }
+
+        // Update chart data
+        function updateCharts(voltage, current, power) {
+            // Add new data points
+            voltageData.push(voltage);
+            currentData.push(current);
+            powerData.push(power);
+            
+            // Remove oldest data points
+            if (voltageData.length > 20) {
+                voltageData.shift();
+                currentData.shift();
+                powerData.shift();
+            }
+            
+            // Update charts
+            voltageChart.data.datasets[0].data = voltageData;
+            currentChart.data.datasets[0].data = currentData;
+            powerChart.data.datasets[0].data = powerData;
+            
+            voltageChart.update();
+            currentChart.update();
+            powerChart.update();
+        }
+
+        // Fetch sensor data from ESP32
+        async function fetchSensorData() {
+            try {
+                const response = await fetch("/data");
+                if (!response.ok) throw new Error("Network response was not ok");
+                
+                const data = await response.json();
+                
+                // Update meters with real data
+                updateMeter("voltageValue", "voltageBar", "voltageIndicator", data.voltage, 300);
+                updateMeter("currentValue", "currentBar", "currentIndicator", data.current, 10);
+                updateMeter("powerValue", "powerBar", "powerIndicator", data.power, 3000);
+                updateMeter("energyValue", "energyBar", "energyIndicator", data.energy, 50);
+                updateMeter("pfValue", "pfBar", "pfIndicator", data.powerFactor, 1);
+                
+                // Update charts
+                updateCharts(data.voltage, data.current, data.power);
+                
+                // Update bill
+                updateBillCalculations(data.energy);
+                
+            } catch (error) {
+                console.error("Error fetching sensor data:", error);
+                // Fallback to simulated data if connection fails
+                const voltage = 220 + (Math.random() * 10 - 5);
+                const current = 2 + (Math.random() * 1.5);
+                const pf = 0.85 + (Math.random() * 0.15);
+                const power = voltage * current * pf;
+                const prevEnergy = parseFloat(document.getElementById("energyValue").textContent);
+                const energy = prevEnergy + (power / 3600 / 20);
+                
+                updateMeter("voltageValue", "voltageBar", "voltageIndicator", voltage, 300);
+                updateMeter("currentValue", "currentBar", "currentIndicator", current, 10);
+                updateMeter("powerValue", "powerBar", "powerIndicator", power, 3000);
+                updateMeter("energyValue", "energyBar", "energyIndicator", energy, 50);
+                updateMeter("pfValue", "pfBar", "pfIndicator", pf, 1);
+                updateCharts(voltage, current, power);
+                updateBillCalculations(energy);
+                
+                showToast("Using simulated data - connection failed", "error");
+            }
+        }
+        
+        // Handle Enter key in login form
+        document.getElementById("password").addEventListener("keypress", (e) => {
+            if (e.key === "Enter") {
+                loginBtn.click();
+            }
+        });
+    </script>
+   
+</body>
+</html>
+)=====";
+  server.send(200, "text/html", html);
+}
+
+void handleData() {
+  // Create JSON response with sensor data
+  StaticJsonDocument<200> doc;
+  doc["voltage"] = emon.Vrms;
+  doc["current"] = emon.Irms;
+  doc["power"] = smoothedPower;
+  doc["energy"] = totalEnergy / 1000; // kWh
+  doc["powerFactor"] = 0.96; // Fixed value as per your calculation
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleLogin() {
+  // Handle login requests
+  if (server.hasArg("username") && server.hasArg("password")) {
+    String username = server.arg("username");
+    String password = server.arg("password");
+    
+    if (username == adminUser && password == adminPass) {
+      server.send(200, "application/json", "{\"status\":\"success\"}");
+    } else {
+      server.send(401, "application/json", "{\"status\":\"error\",\"message\":\"Invalid credentials\"}");
+    }
+  } else {
+    server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Missing parameters\"}");
+  }
+}
